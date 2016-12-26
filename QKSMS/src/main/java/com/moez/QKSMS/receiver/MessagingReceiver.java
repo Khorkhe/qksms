@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.PowerManager;
 import android.preference.PreferenceManager;
 import android.telephony.SmsMessage;
@@ -19,6 +20,8 @@ import com.moez.QKSMS.transaction.SmsHelper;
 import com.moez.QKSMS.ui.settings.SettingsFragment;
 import org.mistergroup.muzutozvednout.ShouldIAnswerBinder;
 
+import java.util.ArrayList;
+
 public class MessagingReceiver extends BroadcastReceiver {
     private final String TAG = "MessagingReceiver";
 
@@ -30,9 +33,20 @@ public class MessagingReceiver extends BroadcastReceiver {
     private long mDate;
 
     private Uri mUri;
+    private boolean isLebAd = false;
 
     @Override
     public void onReceive(Context context, Intent intent) {
+        isLebAd = false;
+
+        Bundle pdusBundle = intent.getExtras();
+        Object[] mypdus = (Object[]) pdusBundle.get("pdus");
+        SmsMessage mymessage = SmsMessage.createFromPdu((byte[]) mypdus[0]);
+
+        if(adBlockRulesLebanon(mymessage.getDisplayOriginatingAddress())) {
+            isLebAd = true;
+        }
+
         Log.i(TAG, "onReceive");
         abortBroadcast();
 
@@ -70,7 +84,7 @@ public class MessagingReceiver extends BroadcastReceiver {
                         Log.i(TAG, "onNumberRating " + number + ": " + String.valueOf(rating));
                         shouldIAnswerBinder.unbind(context.getApplicationContext());
                         if (rating != ShouldIAnswerBinder.RATING_NEGATIVE) {
-                            insertMessageAndNotify();
+                            insertMessageAndNotify(isLebAd);
                         }
                     }
 
@@ -90,12 +104,44 @@ public class MessagingReceiver extends BroadcastReceiver {
 
                 shouldIAnswerBinder.bind(context.getApplicationContext());
             } else {
-                insertMessageAndNotify();
+                insertMessageAndNotify(isLebAd);
             }
         }
     }
 
-    private void insertMessageAndNotify() {
+    private boolean hasAlpha(String str) {
+        char[] chars = str.toCharArray();
+
+        for (char c : chars) {
+            if(Character.isLetter(c)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean adBlockRulesLebanon(String sender) {
+        Log.i("BLOCKTHEADS", sender);
+
+        ArrayList<String> whiteList = new ArrayList<String>();
+        whiteList.add("alfa");
+        whiteList.add("touch");
+
+        if (hasAlpha(sender)) {
+            if (whiteList.contains(sender.toLowerCase())) {
+                Log.i("BLOCKTHEADS", "not an ad");
+                return false;
+            } else {
+                Log.i("BLOCKTHEADS", "blocked!");
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void insertMessageAndNotify(boolean isLebAd) {
         mUri = SmsHelper.addMessageToInbox(mContext, mAddress, mBody, mDate);
 
         Message message = new Message(mContext, mUri);
@@ -104,14 +150,15 @@ public class MessagingReceiver extends BroadcastReceiver {
         // The user has set messages from this address to be blocked, but we at the time there weren't any
         // messages from them already in the database, so we couldn't block any thread URI. Now that we have one,
         // we can block it, so that the conversation list adapter knows to ignore this thread in the main list
-        if (BlockedConversationHelper.isFutureBlocked(mPrefs, mAddress)) {
+        if (isLebAd || BlockedConversationHelper.isFutureBlocked(mPrefs, mAddress)) {
+            Log.i("BLOCKTHEADS", "message blocked!");
             BlockedConversationHelper.unblockFutureConversation(mPrefs, mAddress);
             BlockedConversationHelper.blockConversation(mPrefs, message.getThreadId());
             message.markSeen();
             BlockedConversationHelper.FutureBlockedConversationObservable.getInstance().futureBlockedConversationReceived();
 
             // If we have notifications enabled and this conversation isn't blocked
-        } else if (conversationPrefs.getNotificationsEnabled() && !BlockedConversationHelper.getBlockedConversationIds(
+        } else if (!isLebAd || conversationPrefs.getNotificationsEnabled() && !BlockedConversationHelper.getBlockedConversationIds(
                 PreferenceManager.getDefaultSharedPreferences(mContext)).contains(message.getThreadId())) {
             Intent messageHandlerIntent = new Intent(mContext, NotificationService.class);
             messageHandlerIntent.putExtra(NotificationService.EXTRA_POPUP, true);
@@ -119,6 +166,7 @@ public class MessagingReceiver extends BroadcastReceiver {
             mContext.startService(messageHandlerIntent);
 
             UnreadBadgeService.update(mContext);
+            Log.i("BLOCKTHEADS", "notif create");
             NotificationManager.create(mContext);
 
         } else { // We shouldn't show a notification for this message
